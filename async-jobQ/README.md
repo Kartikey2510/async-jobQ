@@ -43,7 +43,18 @@ flowchart TB
   API -->|read snapshot| STORE
 ```
 
-**Flow:** `POST /jobs` saves a `queued` job and returns an id immediately → workers claim the job, call DigitalOcean inference, then write `succeeded`/`failed` + result → `GET /jobs/{id}` returns the latest committed state.
+### Steps (match the diagram)
+
+1. **Client → API** — `POST /jobs` with a prompt/payload  
+2. **API → Job service** — validate body, create job id  
+3. **Service → JobStore / SQLite** — persist job as `queued` (committed before return)  
+4. **Service → Queue** — enqueue `job_id`; HTTP returns `202` + id immediately  
+5. **Queue → Worker** — one of the 2 workers pulls the id  
+6. **Worker → JobStore** — atomic `claim_queued` (`queued` → `running`)  
+7. **Worker → DigitalOcean Inference** — call `/v1/chat/completions`  
+8. **Inference → Worker** — model returns content + usage  
+9. **Worker → JobStore** — atomic `complete` (`running` → `succeeded`/`failed` + result)  
+10. **Client → API** — `GET /jobs/{id}` reads the latest committed snapshot from SQLite  
 
 ## Layout
 
