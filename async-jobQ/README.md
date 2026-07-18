@@ -2,6 +2,49 @@
 
 FastAPI async job queue with SQLite storage, in-process workers, and DigitalOcean Serverless Inference.
 
+## Architecture
+
+```mermaid
+flowchart TB
+  subgraph Clients
+    C[Client / curl]
+  end
+
+  subgraph Droplet["DigitalOcean Droplet (Docker)"]
+    subgraph App["async-jobq-api container"]
+      API["FastAPI HTTP layer<br/>POST /jobs · GET /jobs/id"]
+      SVC["Job service<br/>create / get"]
+      Q["In-process queue"]
+      W1["Worker 1"]
+      W2["Worker 2"]
+      STORE["JobStore<br/>claim_queued / complete<br/>+ write lock"]
+    end
+    DB[("SQLite<br/>jobs.db volume")]
+  end
+
+  subgraph DO["DigitalOcean"]
+    LLM["Serverless Inference<br/>/v1/chat/completions"]
+  end
+
+  C -->|POST payload| API
+  C -->|GET status| API
+  API --> SVC
+  SVC -->|save queued + enqueue| STORE
+  SVC --> Q
+  STORE --> DB
+  Q --> W1
+  Q --> W2
+  W1 -->|claim → infer → complete| STORE
+  W2 -->|claim → infer → complete| STORE
+  W1 -->|prompt / messages| LLM
+  W2 -->|prompt / messages| LLM
+  LLM -->|content + usage| W1
+  LLM -->|content + usage| W2
+  API -->|read snapshot| STORE
+```
+
+**Flow:** `POST /jobs` saves a `queued` job and returns an id immediately → workers claim the job, call DigitalOcean inference, then write `succeeded`/`failed` + result → `GET /jobs/{id}` returns the latest committed state.
+
 ## Layout
 
 ```
