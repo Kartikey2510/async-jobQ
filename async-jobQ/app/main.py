@@ -1,11 +1,23 @@
 """Async job queue API.
 
-Jobs are accepted immediately, stored in SQLite, and processed by an in-process worker pool.
+Jobs are accepted immediately, stored in SQLite, and processed by an in-process
+worker pool that calls DigitalOcean Serverless Inference.
 """
 
+import logging
 from contextlib import asynccontextmanager
+from pathlib import Path
 
+from dotenv import load_dotenv
 from fastapi import FastAPI
+
+# Load .env from project root (async-jobQ/), not the process cwd.
+load_dotenv(Path(__file__).resolve().parent.parent / ".env")
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s %(levelname)s [%(name)s] %(message)s",
+)
 
 from app.db import init_db
 from app.routes.jobs import router as jobs_router

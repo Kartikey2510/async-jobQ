@@ -5,12 +5,15 @@ from __future__ import annotations
 import logging
 import queue
 import threading
-import time
-from typing import List, Optional
+from typing import Any, Dict, List, Optional
+
+from sqlalchemy.orm import Session
 
 from app.db import SessionLocal
-from app.models.job import JobStatus
+from app.models.job import Job, JobStatus
 from app.store.jobs import job_store
+from app.workers.errors import InferenceError
+from app.workers.inference import run_inference
 
 logger = logging.getLogger(__name__)
 
@@ -65,14 +68,25 @@ class WorkerPool:
             try:
                 if item is _STOP:
                     return
-                self._process_job(str(item))
+                try:
+                    self._process_job(str(item))
+                except Exception:  # noqa: BLE001 — keep worker alive
+                    logger.exception(
+                        "Unhandled error while processing queue item %r", item
+                    )
             finally:
                 self._queue.task_done()
 
     def _process_job(self, job_id: str) -> None:
         db = SessionLocal()
+        job: Optional[Job] = None
         try:
-            job = job_store.get(job_id, db)
+            try:
+                job = job_store.get(job_id, db)
+            except Exception:
+                logger.exception("Failed to load job %s from store", job_id)
+                return
+
             if job is None:
                 logger.warning("Job %s not found; skipping", job_id)
                 return
@@ -80,24 +94,66 @@ class WorkerPool:
                 logger.info("Job %s status is %s; skipping", job_id, job.status)
                 return
 
-            job.status = JobStatus.running
-            job_store.update(job, db)
+            if not self._mark_status(job, JobStatus.running, db):
+                return
 
             try:
-                # Mock processing — replace with real work (e.g. LLM) later.
-                time.sleep(3)
-                result = {"echo": job.payload, "processed": True}
+                logger.info("Job %s calling DigitalOcean inference", job_id)
+                result = run_inference(job.payload)
                 job.status = JobStatus.succeeded
                 job.result = result
-                job_store.update(job, db)
-                logger.info("Job %s succeeded", job_id)
-            except Exception as exc:  # noqa: BLE001 — persist failure on the job
-                logger.exception("Job %s failed", job_id)
-                job.status = JobStatus.failed
-                job.result = {"error": str(exc)}
-                job_store.update(job, db)
+                if not self._persist(job, db):
+                    logger.error(
+                        "Job %s succeeded in inference but failed to persist result",
+                        job_id,
+                    )
+                    return
+                logger.info("Job %s succeeded result=%s", job_id, result)
+            except InferenceError as exc:
+                logger.error(
+                    "Job %s failed code=%s retryable=%s error=%s",
+                    job_id,
+                    exc.code,
+                    exc.retryable,
+                    exc.message,
+                )
+                self._fail_job(job, exc.to_result(), db)
+            except Exception as exc:  # noqa: BLE001 — unexpected failures
+                logger.exception("Job %s failed with unexpected error", job_id)
+                self._fail_job(
+                    job,
+                    {
+                        "error": str(exc),
+                        "code": "unexpected_error",
+                        "retryable": False,
+                    },
+                    db,
+                )
         finally:
             db.close()
+
+    def _mark_status(self, job: Job, status: JobStatus, db: Session) -> bool:
+        job.status = status
+        return self._persist(job, db)
+
+    def _fail_job(self, job: Job, result: Dict[str, Any], db: Session) -> None:
+        job.status = JobStatus.failed
+        job.result = result
+        if not self._persist(job, db):
+            logger.error("Job %s could not persist failure state: %s", job.id, result)
+
+    @staticmethod
+    def _persist(job: Job, db: Session) -> bool:
+        try:
+            job_store.update(job, db)
+            return True
+        except Exception:
+            logger.exception("Failed to persist job %s status=%s", job.id, job.status)
+            try:
+                db.rollback()
+            except Exception:
+                logger.exception("Rollback failed for job %s", job.id)
+            return False
 
 
 worker_pool = WorkerPool(num_workers=2)
