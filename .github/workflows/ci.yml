@@ -1,0 +1,40 @@
+name: CI
+
+on:
+  push:
+    branches: [master, main, job_processing]
+  pull_request:
+    branches: [master, main]
+
+jobs:
+  test:
+    name: Run tests
+    runs-on: ubuntu-latest
+
+    defaults:
+      run:
+        working-directory: async-jobQ
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: async-jobQ/requirements.txt
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Run tests
+        env:
+          PYTHONPATH: .
+          # Tests mock DigitalOcean; no real key required.
+          DO_MODEL_ACCESS_KEY: test-key-not-used
+          DO_INFERENCE_MODEL: llama3.3-70b-instruct
+        run: pytest -q
