@@ -1,0 +1,17 @@
+services:
+  api:
+    build: .
+    container_name: async-jobq-api
+    ports:
+      - "8000:8000"
+    env_file:
+      - .env
+    environment:
+      SQLITE_PATH: /data/jobs.db
+    volumes:
+      # Persist SQLite across container restarts/redeploys
+      - jobdata:/data
+    restart: unless-stopped
+
+volumes:
+  jobdata:

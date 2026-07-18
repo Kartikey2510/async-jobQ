@@ -1,0 +1,13 @@
+.venv/
+.venv-local/
+__pycache__/
+*.pyc
+.pytest_cache/
+.git/
+.env
+.env.*
+!.env.example
+*.db
+tests/
+README.md
+docker-compose.yml
