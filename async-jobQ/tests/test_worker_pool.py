@@ -109,8 +109,9 @@ def test_process_job_skips_missing_id(pool):
 
 
 def test_process_job_skips_non_queued(pool, db, store, queued_job, SessionLocal):
-    queued_job.status = JobStatus.running
-    store.update(queued_job, db)
+    # Already claimed / running — atomic claim should no-op.
+    claimed = store.claim_queued(queued_job.id, db)
+    assert claimed is not None
 
     with patch("app.workers.pool.run_inference") as mock_infer:
         pool._process_job(queued_job.id)

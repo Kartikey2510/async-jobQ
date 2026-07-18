@@ -79,32 +79,29 @@ class WorkerPool:
 
     def _process_job(self, job_id: str) -> None:
         db = SessionLocal()
-        job: Optional[Job] = None
         try:
+            # Atomic queued → running claim (safe vs duplicate queue / concurrent workers).
             try:
-                job = job_store.get(job_id, db)
+                job = job_store.claim_queued(job_id, db)
             except Exception:
-                logger.exception("Failed to load job %s from store", job_id)
+                logger.exception("Failed to claim job %s", job_id)
                 return
 
             if job is None:
-                logger.warning("Job %s not found; skipping", job_id)
-                return
-            if job.status != JobStatus.queued:
-                logger.info("Job %s status is %s; skipping", job_id, job.status)
-                return
-
-            if not self._mark_status(job, JobStatus.running, db):
+                logger.info(
+                    "Job %s not claimed (missing or not queued); skipping", job_id
+                )
                 return
 
             try:
                 logger.info("Job %s calling DigitalOcean inference", job_id)
                 result = run_inference(job.payload)
-                job.status = JobStatus.succeeded
-                job.result = result
-                if not self._persist(job, db):
+                completed = self._complete(
+                    job_id, JobStatus.succeeded, result, db
+                )
+                if completed is None:
                     logger.error(
-                        "Job %s succeeded in inference but failed to persist result",
+                        "Job %s inference succeeded but atomic complete failed",
                         job_id,
                     )
                     return
@@ -117,11 +114,12 @@ class WorkerPool:
                     exc.retryable,
                     exc.message,
                 )
-                self._fail_job(job, exc.to_result(), db)
+                self._complete(job_id, JobStatus.failed, exc.to_result(), db)
             except Exception as exc:  # noqa: BLE001 — unexpected failures
                 logger.exception("Job %s failed with unexpected error", job_id)
-                self._fail_job(
-                    job,
+                self._complete(
+                    job_id,
+                    JobStatus.failed,
                     {
                         "error": str(exc),
                         "code": "unexpected_error",
@@ -132,28 +130,37 @@ class WorkerPool:
         finally:
             db.close()
 
-    def _mark_status(self, job: Job, status: JobStatus, db: Session) -> bool:
-        job.status = status
-        return self._persist(job, db)
-
-    def _fail_job(self, job: Job, result: Dict[str, Any], db: Session) -> None:
-        job.status = JobStatus.failed
-        job.result = result
-        if not self._persist(job, db):
-            logger.error("Job %s could not persist failure state: %s", job.id, result)
-
     @staticmethod
-    def _persist(job: Job, db: Session) -> bool:
+    def _complete(
+        job_id: str,
+        status: JobStatus,
+        result: Dict[str, Any],
+        db: Session,
+    ) -> Optional[Job]:
         try:
-            job_store.update(job, db)
-            return True
+            completed = job_store.complete(
+                job_id,
+                status=status,
+                result=result,
+                db=db,
+                expected_status=JobStatus.running,
+            )
+            if completed is None:
+                logger.error(
+                    "Job %s could not transition running → %s (lost claim?)",
+                    job_id,
+                    status.value,
+                )
+            return completed
         except Exception:
-            logger.exception("Failed to persist job %s status=%s", job.id, job.status)
+            logger.exception(
+                "Failed to persist job %s terminal status=%s", job_id, status.value
+            )
             try:
                 db.rollback()
             except Exception:
-                logger.exception("Rollback failed for job %s", job.id)
-            return False
+                logger.exception("Rollback failed for job %s", job_id)
+            return None
 
 
 worker_pool = WorkerPool(num_workers=2)
